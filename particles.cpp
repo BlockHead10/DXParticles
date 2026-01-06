@@ -10,41 +10,53 @@
 #include <d3dcompiler.h>
 #pragma comment(lib, "D3dcompiler.lib")
 #include <algorithm>
+#include <wrl/client.h>
 
 using namespace DirectX;
+using Microsoft::WRL::ComPtr;
 
-// --- DirectX globals ---
+// DirectX Objects
 ID3D11Device* g_pd3dDevice = nullptr;
 ID3D11DeviceContext* g_pImmediateContext = nullptr;
 IDXGISwapChain* g_pSwapChain = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
+ID3D11InputLayout* g_pInputLayout = nullptr;
+ID3D11VertexShader* g_pVertexShader = nullptr;
+ID3D11PixelShader* g_pPixelShader = nullptr;
+ID3D11Buffer* g_pVertexBuffer = nullptr;
+ID3D11Buffer* g_pMatrixBuffer = nullptr;
 
-// --- Window size ---
-const int g_width = 800;
-const int g_height = 600;
 
-// --- Particle struct ---
+// Window Size
+const int g_width = 1920;
+const int g_height = 1080;
+
+// Particle Struct
 struct Particle3D
 {
     XMFLOAT3 pos;
     XMFLOAT3 vel;
 };
 
-// --- Particle settings ---
+// Particle Settings
 std::vector<Particle3D> particles;
 const int numParticles = 400;
 const float maxDepth = 100.0f;
 const float particleSpeed = 40.0f;
 const float particleLineDist = 40.0f;
+const int maxLines = 3;
 
-// --- Vertex for lines ---
+// Virtex for Lines
 struct Vertex
 {
     XMFLOAT3 pos;
     XMFLOAT4 color;
 };
 
-// --- Camera ---
+// Boundary Box Virtex Buffer
+ID3D11Buffer* g_pBoundaryVB = nullptr;
+
+// Camera Objects
 XMMATRIX g_view;
 XMMATRIX g_proj;
 float g_rotationAngle = 0.0f;  // horizontal rotation (around Y)
@@ -55,7 +67,7 @@ const float g_minRadius = 100.0f;
 const float g_maxRadius = 1500.0f;
 
 
-// --- Shaders (HLSL compiled at runtime) ---
+// Shaders
 const char* g_VSCode = R"(
 cbuffer MatrixBuffer : register(b0)
 {
@@ -100,20 +112,13 @@ float4 PS(PS_INPUT input) : SV_TARGET
 }
 )";
 
-// --- DirectX objects ---
-ID3D11InputLayout* g_pInputLayout = nullptr;
-ID3D11VertexShader* g_pVertexShader = nullptr;
-ID3D11PixelShader* g_pPixelShader = nullptr;
-ID3D11Buffer* g_pVertexBuffer = nullptr;
-ID3D11Buffer* g_pMatrixBuffer = nullptr;
-
-// --- Simple compile helper ---
+// Compile Shader Helpers
 HRESULT CompileShaderFromMemory(const char* src, const char* entry, const char* target, ID3DBlob** blob)
 {
     return D3DCompile(src, strlen(src), nullptr, nullptr, nullptr, entry, target, 0, 0, blob, nullptr);
 }
 
-// --- Initialize DX ---
+// Initialize DX 
 bool InitD3D(HWND hWnd)
 {
     DXGI_SWAP_CHAIN_DESC sd = {};
@@ -133,9 +138,23 @@ bool InitD3D(HWND hWnd)
     );
     if (FAILED(hrCreate)) return false;
 
-    ID3D11Texture2D* pBackBuffer = nullptr;
-    g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
-    g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
+    // Initialize and get the back buffer
+    ComPtr<ID3D11Texture2D> pBackBuffer; // Using ComPtr gets rid of Buffer Could be 0 warning.
+    HRESULT BackBufferResult = g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
+    if (FAILED(BackBufferResult))
+        return false;
+
+    BackBufferResult = g_pd3dDevice->CreateRenderTargetView(
+        pBackBuffer.Get(),
+        nullptr,
+        &g_mainRenderTargetView
+    );
+
+    if (FAILED(BackBufferResult))
+        return false;
+    // This way works, its from a lot of guides but produces a pBackBuffer could be 0 warning
+    //g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
+    //g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
     pBackBuffer->Release();
     g_pImmediateContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
     D3D11_VIEWPORT vp = {};
@@ -144,7 +163,7 @@ bool InitD3D(HWND hWnd)
     vp.MaxDepth = 1.0f;
     g_pImmediateContext->RSSetViewports(1, &vp);
 
-    // --- Compile shaders ---
+    // Compile shaders
     ID3DBlob* vsBlob = nullptr;
     ID3DBlob* psBlob = nullptr;
     ID3DBlob* errorBlob = nullptr;
@@ -171,7 +190,7 @@ bool InitD3D(HWND hWnd)
     hr = g_pd3dDevice->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_pPixelShader);
     if (FAILED(hr)) return false;
 
-    // --- Input layout ---
+    // Input layout
     D3D11_INPUT_ELEMENT_DESC layoutDesc[] =
     {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
@@ -181,7 +200,7 @@ bool InitD3D(HWND hWnd)
     vsBlob->Release();
     psBlob->Release();
 
-    // --- Matrix buffer ---
+    // Matrix buffer 
     D3D11_BUFFER_DESC cbd = {};
     cbd.ByteWidth = sizeof(XMMATRIX) * 3;
     cbd.Usage = D3D11_USAGE_DYNAMIC;
@@ -189,19 +208,19 @@ bool InitD3D(HWND hWnd)
     cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     g_pd3dDevice->CreateBuffer(&cbd, nullptr, &g_pMatrixBuffer);
 
-    // --- Projection ---
+    // Projection
     g_proj = XMMatrixPerspectiveFovLH(XM_PIDIV4, g_width / (float)g_height, 1.0f, 1000.0f);
 
     return true;
 }
 
-// --- Initialize particles ---
+// Initialize particles
 void InitParticles()
 {
     particles.resize(numParticles);
     for (auto& p : particles)
     {
-        float cubeSize = 200.0f;  // cube spans -100 +100 in all axes
+        float cubeSize = 200.0f;  // Cube Bounds Box
         p.pos = XMFLOAT3(
             ((float)rand() / RAND_MAX - 0.5f) * cubeSize,
             ((float)rand() / RAND_MAX - 0.5f) * cubeSize,
@@ -216,10 +235,10 @@ void InitParticles()
     }
 }
 
-// --- Update particles ---
+// Update particles
 void UpdateParticles(float dt)
 {
-    float halfSize = 150.0f; // cube extends from -halfSize to +halfSize on all axes
+    float halfSize = 150.0f; // Particle bounding Size
 
     for (auto& p : particles)
     {
@@ -227,7 +246,7 @@ void UpdateParticles(float dt)
         p.pos.y += p.vel.y * dt;
         p.pos.z += p.vel.z * dt;
 
-        // Reflect/bounce off cube walls
+        // Reflect/bounce off walls
         if (p.pos.x < -halfSize || p.pos.x > halfSize) p.vel.x *= -1;
         if (p.pos.y < -halfSize || p.pos.y > halfSize) p.vel.y *= -1;
         if (p.pos.z < -halfSize || p.pos.z > halfSize) p.vel.z *= -1;
@@ -239,7 +258,62 @@ void UpdateParticles(float dt)
     }
 }
 
-// --- Create line vertices ---
+void DrawBoundaryBox(
+        ID3D11Device* device,
+        ID3D11DeviceContext* context,
+        float halfSize,
+        ID3D11Buffer*& lineVB
+    )
+{
+    XMFLOAT4 color = XMFLOAT4(1, 1, 1, 1);
+
+    Vertex verts[] =
+    {
+        // Bottom square
+        {{-halfSize,-halfSize,-halfSize}, color}, {{ halfSize,-halfSize,-halfSize}, color},
+        {{ halfSize,-halfSize,-halfSize}, color}, {{ halfSize,-halfSize, halfSize}, color},
+        {{ halfSize,-halfSize, halfSize}, color}, {{-halfSize,-halfSize, halfSize}, color},
+        {{-halfSize,-halfSize, halfSize}, color}, {{-halfSize,-halfSize,-halfSize}, color},
+
+        // Top square
+        {{-halfSize, halfSize,-halfSize}, color}, {{ halfSize, halfSize,-halfSize}, color},
+        {{ halfSize, halfSize,-halfSize}, color}, {{ halfSize, halfSize, halfSize}, color},
+        {{ halfSize, halfSize, halfSize}, color}, {{-halfSize, halfSize, halfSize}, color},
+        {{-halfSize, halfSize, halfSize}, color}, {{-halfSize, halfSize,-halfSize}, color},
+
+        // Vertical edges
+        {{-halfSize,-halfSize,-halfSize}, color}, {{-halfSize, halfSize,-halfSize}, color},
+        {{ halfSize,-halfSize,-halfSize}, color}, {{ halfSize, halfSize,-halfSize}, color},
+        {{ halfSize,-halfSize, halfSize}, color}, {{ halfSize, halfSize, halfSize}, color},
+        {{-halfSize,-halfSize, halfSize}, color}, {{-halfSize, halfSize, halfSize}, color},
+    };
+    if (!lineVB)
+    {
+        D3D11_BUFFER_DESC bd = {};
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.ByteWidth = sizeof(verts);
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+        device->CreateBuffer(&bd, nullptr, &lineVB);
+    }
+
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    context->Map(lineVB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    memcpy(mapped.pData, verts, sizeof(verts));
+    context->Unmap(lineVB, 0);
+
+    UINT stride = sizeof(Vertex);
+    UINT offset = 0;
+
+    context->IASetVertexBuffers(0, 1, &lineVB, &stride, &offset);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+
+    context->Draw(24, 0); //Lines * Verts
+}
+
+
+// Create line vertices
 void BuildLineVertices(std::vector<Vertex>& verts)
 {
     verts.clear();
@@ -264,7 +338,7 @@ void BuildLineVertices(std::vector<Vertex>& verts)
     }
 }
 
-// --- Win32 WndProc ---
+// Win32 WndProc
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
@@ -276,7 +350,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_MOUSEWHEEL:
     {
         short delta = GET_WHEEL_DELTA_WPARAM(wParam);
-        g_radius -= delta * 0.25f; // adjust sensitivity
+        g_radius -= delta * 0.25f; // Sensitivity
         if (g_radius < g_minRadius) g_radius = g_minRadius;
         if (g_radius > g_maxRadius) g_radius = g_maxRadius;
     }
@@ -286,7 +360,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
-// --- Main ---
+// Main
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 {
     srand((unsigned int)time(0));
@@ -297,25 +371,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
     RegisterClassEx(&wc);
 
     HWND hWnd = CreateWindow(L"DXParticles", L"3D Particle Network",
-        WS_OVERLAPPEDWINDOW, 100, 100, g_width, g_height,
-        nullptr, nullptr, hInstance, nullptr);
+        WS_POPUP, 0, 0, g_width, g_height, nullptr, nullptr, hInstance, nullptr);
+
     ShowWindow(hWnd, SW_SHOWDEFAULT);
     UpdateWindow(hWnd);
 
     if (!InitD3D(hWnd)) return 1;
 
     InitParticles();
+    
+
 
     // Vertex buffer
     D3D11_BUFFER_DESC vbd = {};
     vbd.Usage = D3D11_USAGE_DYNAMIC;
-    vbd.ByteWidth = sizeof(Vertex) * numParticles * numParticles * 2; // max possible lines
+    vbd.ByteWidth = sizeof(Vertex) * numParticles * numParticles * maxLines;
     vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
     vbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     g_pd3dDevice->CreateBuffer(&vbd, nullptr, &g_pVertexBuffer);
 
     MSG msg = {};
-    DWORD lastTime = GetTickCount();
+    ULONGLONG lastTime = GetTickCount64();
 
     while (msg.message != WM_QUIT)
     {
@@ -326,9 +402,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
         }
         else
         {
-            DWORD now = GetTickCount();
+            ULONGLONG now = GetTickCount64();
             float dt = (now - lastTime) / 1000.0f;
             lastTime = now;
+           
 
             // Update particles
             UpdateParticles(dt);
@@ -336,7 +413,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
             // Build line vertices
             std::vector<Vertex> verts;
             BuildLineVertices(verts);
-
+            
             // Update vertex buffer
             D3D11_MAPPED_SUBRESOURCE ms;
             g_pImmediateContext->Map(g_pVertexBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms);
@@ -356,13 +433,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
             g_pImmediateContext->VSSetShader(g_pVertexShader, nullptr, 0);
             g_pImmediateContext->PSSetShader(g_pPixelShader, nullptr, 0);
 
-            // --- Update matrices ---
-            XMMATRIX world = XMMatrixIdentity();
+            // Update matrices
+            XMMATRIX world = XMMatrixIdentity();   
 
-            // --- Camera orbit parameters ---
-   
-
-            // --- Convert spherical coords to Cartesian for orbiting camera ---
+            // Convert angles + dist to Cartesian 
             float camX = sinf(g_rotationAngle) * cosf(g_pitchAngle) * g_radius;
             float camY = sinf(g_pitchAngle) * g_radius;
             float camZ = cosf(g_rotationAngle) * cosf(g_pitchAngle) * g_radius;
@@ -373,20 +447,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 
             XMMATRIX view = XMMatrixLookAtLH(eye, focus, up);
 
-            // --- Mouse input for rotation ---
+            // Mouse input for rotation
             static POINT lastMouse = {};
             POINT currMouse;
             GetCursorPos(&currMouse);
 
-            if (GetAsyncKeyState(VK_RBUTTON) & 0x8000)  // right button held
+            if (GetAsyncKeyState(VK_RBUTTON) & 0x8000)
             {
                 float dx = (currMouse.x - lastMouse.x) * 0.005f; // sensitivity
                 float dy = (currMouse.y - lastMouse.y) * 0.005f;
 
-                g_rotationAngle += dx;   // horizontal orbit
-                g_pitchAngle += dy;      // vertical orbit
+                g_rotationAngle += dx;
+                g_pitchAngle += dy;
 
-                // Clamp pitch to avoid flipping
+                // Clamp pitch
                 const float pitchLimit = XM_PIDIV2 - 0.01f;
                 if (g_pitchAngle > pitchLimit) g_pitchAngle = pitchLimit;
                 if (g_pitchAngle < -pitchLimit) g_pitchAngle = -pitchLimit;
@@ -406,18 +480,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
             // Draw lines
             g_pImmediateContext->Draw(verts.size(), 0);
 
-            // === QUICK FIX: DRAW PARTICLES AS POINTS (add everything below here) ===
             std::vector<Vertex> pointVerts;
             pointVerts.reserve(numParticles);
             for (const auto& p : particles)
             {
-                // Simple depth-based brightness (closer = brighter)
-                float depthNorm = (p.pos.z - 50.0f) / 150.0f;  // 0 = near, 1 = far
-                float brightness = 1.0f - depthNorm * 0.6f;    // keep some minimum brightness
+                // Depth-based brightness
+                float depthNorm = (p.pos.z - 50.0f) / 150.0f;
+                float brightness = 1.0f - depthNorm * 0.6f;
                 brightness = std::max(brightness, 0.4f);
 
-                pointVerts.push_back({ p.pos, XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f) });  // solid white, full alpha
-                // Or use brightness: XMFLOAT4(brightness, brightness, brightness + 0.2f, 1.0f)
+                pointVerts.push_back({ p.pos, XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f) });
             }
 
             // Update the same vertex buffer with point data
@@ -431,10 +503,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
             // Draw the particles
             g_pImmediateContext->Draw(numParticles, 0);
 
-            // (Optional) Switch back to lines if you plan to draw more stuff later
-            // g_pImmediateContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+			// Draw boundary box
+            DrawBoundaryBox(g_pd3dDevice, g_pImmediateContext, 150.0f, g_pBoundaryVB);
 
-            // === End of quick fix ===
 
             // Present
             g_pSwapChain->Present(1, 0);
@@ -443,4 +514,3 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 
     return 0;
 }
-
